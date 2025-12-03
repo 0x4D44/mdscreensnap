@@ -34,6 +34,14 @@ pub struct Args {
     /// Print the output path without capturing (dry run)
     #[arg(long)]
     pub dry_run: bool,
+
+    /// Suppress all output (quiet mode)
+    #[arg(short, long)]
+    pub quiet: bool,
+
+    /// Copy screenshot to clipboard (in addition to saving file)
+    #[arg(short, long)]
+    pub clipboard: bool,
 }
 
 fn main() -> Result<()> {
@@ -41,8 +49,19 @@ fn main() -> Result<()> {
     run(args)
 }
 
+/// Macro for conditional printing based on quiet mode
+macro_rules! print_unless_quiet {
+    ($quiet:expr, $($arg:tt)*) => {
+        if !$quiet {
+            println!($($arg)*);
+        }
+    };
+}
+
 /// Main application logic, separated for testing
 pub fn run(args: Args) -> Result<()> {
+    let quiet = args.quiet;
+
     // Determine the output directory
     let output_dir = args.output.unwrap_or_else(get_temp_dir);
 
@@ -55,20 +74,27 @@ pub fn run(args: Args) -> Result<()> {
     let output_path = output_dir.join(&filename);
 
     if args.dry_run {
-        println!("Would save screenshot to: {}", output_path.display());
+        // Always print path in dry-run mode (that's the point)
+        println!("{}", output_path.display());
         return Ok(());
     }
 
     // Apply delay if specified
     if args.delay > 0 {
-        println!("Waiting {} seconds before capture...", args.delay);
+        print_unless_quiet!(quiet, "Waiting {} seconds before capture...", args.delay);
         std::thread::sleep(std::time::Duration::from_secs(args.delay));
     }
 
     // Capture the screenshot
     capture_screenshot(&output_path)?;
 
-    println!("Screenshot saved to: {}", output_path.display());
+    print_unless_quiet!(quiet, "Screenshot saved to: {}", output_path.display());
+
+    // Copy to clipboard if requested
+    if args.clipboard {
+        copy_to_clipboard(&output_path)?;
+        print_unless_quiet!(quiet, "Screenshot copied to clipboard");
+    }
 
     // Open the screenshot if requested
     if args.open {
@@ -151,7 +177,8 @@ pub fn generate_filename_with_datetime(suffix: &Option<String>, date_prefix: Str
     }
 }
 
-/// Validate that a filename matches the expected date format pattern
+/// Validate that a filename matches the expected date format pattern (test-only)
+#[cfg(test)]
 pub fn validate_filename_format(filename: &str) -> bool {
     // Pattern: YYYY.MM.DD_HHMMSS[_suffix].png
     let re_without_suffix = regex::Regex::new(r"^\d{4}\.\d{2}\.\d{2}_\d{6}\.png$").unwrap();
@@ -436,6 +463,75 @@ pub fn wsl_to_windows_path(path: &PathBuf) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
+/// Copy a screenshot to the clipboard
+pub fn copy_to_clipboard(path: &PathBuf) -> Result<()> {
+    if cfg!(windows) {
+        copy_to_clipboard_windows(path)
+    } else if is_wsl() {
+        copy_to_clipboard_wsl(path)
+    } else {
+        bail!("Clipboard copy is only supported on Windows and WSL")
+    }
+}
+
+/// Copy to clipboard on native Windows using PowerShell
+#[cfg(windows)]
+fn copy_to_clipboard_windows(path: &PathBuf) -> Result<()> {
+    let ps_script = format!(
+        r#"
+Add-Type -AssemblyName System.Windows.Forms
+$image = [System.Drawing.Image]::FromFile('{}')
+[System.Windows.Forms.Clipboard]::SetImage($image)
+$image.Dispose()
+"#,
+        path.to_string_lossy().replace('\'', "''")
+    );
+
+    let output = Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", &ps_script])
+        .output()
+        .context("Failed to execute PowerShell for clipboard copy")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("Clipboard copy failed: {}", stderr);
+    }
+
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn copy_to_clipboard_windows(_path: &PathBuf) -> Result<()> {
+    bail!("Windows clipboard copy is not available on this platform")
+}
+
+/// Copy to clipboard from WSL using PowerShell
+fn copy_to_clipboard_wsl(path: &PathBuf) -> Result<()> {
+    let windows_path = wsl_to_windows_path(path)?;
+
+    let ps_script = format!(
+        r#"
+Add-Type -AssemblyName System.Windows.Forms
+$image = [System.Drawing.Image]::FromFile('{}')
+[System.Windows.Forms.Clipboard]::SetImage($image)
+$image.Dispose()
+"#,
+        windows_path.replace('\\', "\\\\").replace('\'', "''")
+    );
+
+    let output = Command::new("powershell.exe")
+        .args(["-NoProfile", "-NonInteractive", "-Command", &ps_script])
+        .output()
+        .context("Failed to execute PowerShell for clipboard copy")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("Clipboard copy failed: {}", stderr);
+    }
+
+    Ok(())
+}
+
 /// Open a file with the default application
 pub fn open_file(path: &PathBuf) -> Result<()> {
     if cfg!(windows) {
@@ -702,6 +798,8 @@ mod tests {
         assert_eq!(args.delay, 0);
         assert!(!args.open);
         assert!(!args.dry_run);
+        assert!(!args.quiet);
+        assert!(!args.clipboard);
     }
 
     #[test]
@@ -764,6 +862,8 @@ mod tests {
             "3",
             "--open",
             "--dry-run",
+            "--quiet",
+            "--clipboard",
         ])
         .unwrap();
         assert_eq!(args.name, Some("test".to_string()));
@@ -771,6 +871,8 @@ mod tests {
         assert_eq!(args.delay, 3);
         assert!(args.open);
         assert!(args.dry_run);
+        assert!(args.quiet);
+        assert!(args.clipboard);
     }
 
     #[test]
@@ -783,6 +885,37 @@ mod tests {
     fn test_args_parse_missing_name_value() {
         let result = Args::try_parse_from(["mdscreensnap", "--name"]);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_args_parse_quiet_short() {
+        let args = Args::try_parse_from(["mdscreensnap", "-q"]).unwrap();
+        assert!(args.quiet);
+    }
+
+    #[test]
+    fn test_args_parse_quiet_long() {
+        let args = Args::try_parse_from(["mdscreensnap", "--quiet"]).unwrap();
+        assert!(args.quiet);
+    }
+
+    #[test]
+    fn test_args_parse_clipboard_short() {
+        let args = Args::try_parse_from(["mdscreensnap", "-c"]).unwrap();
+        assert!(args.clipboard);
+    }
+
+    #[test]
+    fn test_args_parse_clipboard_long() {
+        let args = Args::try_parse_from(["mdscreensnap", "--clipboard"]).unwrap();
+        assert!(args.clipboard);
+    }
+
+    #[test]
+    fn test_args_parse_quiet_and_clipboard() {
+        let args = Args::try_parse_from(["mdscreensnap", "-q", "-c"]).unwrap();
+        assert!(args.quiet);
+        assert!(args.clipboard);
     }
 
     // ==================== Output Path Building Tests ====================
@@ -862,6 +995,18 @@ mod tests {
         assert!(script.contains("Dispose()"));
     }
 
+    // ==================== Clipboard Tests ====================
+
+    #[test]
+    fn test_copy_to_clipboard_unsupported_platform() {
+        // On non-Windows, non-WSL systems, clipboard copy should fail gracefully
+        let path = PathBuf::from("/tmp/test.png");
+        let result = copy_to_clipboard(&path);
+        // This will either fail (unsupported) or succeed (WSL), both are valid
+        // We just ensure it doesn't panic
+        let _ = result;
+    }
+
     // ==================== Temp Directory Tests ====================
 
     #[test]
@@ -882,6 +1027,8 @@ mod tests {
             delay: 0,
             open: false,
             dry_run: true,
+            quiet: false,
+            clipboard: false,
         };
 
         let result = run(args);
@@ -903,11 +1050,31 @@ mod tests {
             delay: 0,
             open: false,
             dry_run: true,
+            quiet: false,
+            clipboard: false,
         };
 
         let result = run(args);
         assert!(result.is_ok());
         assert!(new_dir.exists());
+    }
+
+    #[test]
+    fn test_quiet_mode_dry_run() {
+        let temp_dir = tempdir().unwrap();
+        let args = Args {
+            name: Some("test".to_string()),
+            output: Some(temp_dir.path().to_path_buf()),
+            delay: 0,
+            open: false,
+            dry_run: true,
+            quiet: true,
+            clipboard: false,
+        };
+
+        // Should succeed without errors
+        let result = run(args);
+        assert!(result.is_ok());
     }
 
     // ==================== Edge Cases ====================

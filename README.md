@@ -9,7 +9,9 @@ A simple command-line screenshot tool for Windows and WSL.
 - Saves to system temporary directory by default
 - Optional delay before capture
 - Custom output directory support
+- Copy to clipboard support
 - Open screenshot after capture
+- Quiet mode for scripting
 
 ## Installation
 
@@ -44,11 +46,21 @@ mdscreensnap --delay 3
 # Take a screenshot and open it immediately
 mdscreensnap --open
 
+# Take a screenshot and copy to clipboard
+mdscreensnap --clipboard
+
 # Show where the screenshot would be saved (dry run)
 mdscreensnap --dry-run
 
+# Silent mode for scripting (only outputs path on dry-run)
+mdscreensnap --quiet
+
 # Combine options
-mdscreensnap --name feature-demo --delay 5 --open
+mdscreensnap --name feature-demo --delay 5 --open --clipboard
+
+# Use in scripts (get path, capture silently)
+SCREENSHOT_PATH=$(mdscreensnap --dry-run)
+mdscreensnap -q -c  # Capture silently with clipboard
 ```
 
 ## Options
@@ -59,6 +71,8 @@ mdscreensnap --name feature-demo --delay 5 --open
 | `--output` | `-o` | Output directory (defaults to system temp directory) |
 | `--delay` | `-d` | Delay in seconds before taking the screenshot (default: 0) |
 | `--open` | | Open the screenshot after saving |
+| `--clipboard` | `-c` | Copy screenshot to clipboard (in addition to file) |
+| `--quiet` | `-q` | Suppress all output (quiet mode for scripting) |
 | `--dry-run` | | Print the output path without capturing |
 | `--help` | `-h` | Show help information |
 | `--version` | `-V` | Show version information |
