@@ -42,6 +42,18 @@ pub struct Args {
     /// Copy screenshot to clipboard (in addition to saving file)
     #[arg(short, long)]
     pub clipboard: bool,
+
+    /// Don't save to file, only copy to clipboard (requires --clipboard)
+    #[arg(long, requires = "clipboard")]
+    pub no_save: bool,
+
+    /// Monitor to capture: 0, 1, 2... for specific monitor, or "all" for all monitors
+    #[arg(short, long, default_value = "primary")]
+    pub monitor: String,
+
+    /// List available monitors and exit
+    #[arg(long)]
+    pub list_monitors: bool,
 }
 
 fn main() -> Result<()> {
@@ -58,9 +70,47 @@ macro_rules! print_unless_quiet {
     };
 }
 
+/// Parse monitor selection from string
+pub fn parse_monitor_selection(monitor: &str) -> MonitorSelection {
+    match monitor.to_lowercase().as_str() {
+        "primary" => MonitorSelection::Primary,
+        "all" => MonitorSelection::All,
+        s => s
+            .parse::<usize>()
+            .map(MonitorSelection::Index)
+            .unwrap_or(MonitorSelection::Primary),
+    }
+}
+
+/// Monitor selection options
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MonitorSelection {
+    Primary,
+    Index(usize),
+    All,
+}
+
+impl std::fmt::Display for MonitorSelection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            MonitorSelection::Primary => write!(f, "primary"),
+            MonitorSelection::Index(i) => write!(f, "{}", i),
+            MonitorSelection::All => write!(f, "all"),
+        }
+    }
+}
+
 /// Main application logic, separated for testing
 pub fn run(args: Args) -> Result<()> {
     let quiet = args.quiet;
+
+    // Handle --list-monitors
+    if args.list_monitors {
+        return list_monitors();
+    }
+
+    // Parse monitor selection
+    let monitor = parse_monitor_selection(&args.monitor);
 
     // Determine the output directory
     let output_dir = args.output.unwrap_or_else(get_temp_dir);
@@ -85,22 +135,96 @@ pub fn run(args: Args) -> Result<()> {
         std::thread::sleep(std::time::Duration::from_secs(args.delay));
     }
 
-    // Capture the screenshot
-    capture_screenshot(&output_path)?;
+    // For no-save mode, use a temp file
+    let (actual_output_path, is_temp) = if args.no_save {
+        let temp_path = env::temp_dir().join(format!("mdscreensnap_temp_{}.png", std::process::id()));
+        (temp_path, true)
+    } else {
+        (output_path.clone(), false)
+    };
 
-    print_unless_quiet!(quiet, "Screenshot saved to: {}", output_path.display());
+    // Capture the screenshot
+    capture_screenshot_with_monitor(&actual_output_path, &monitor)?;
+
+    if !args.no_save {
+        print_unless_quiet!(quiet, "Screenshot saved to: {}", output_path.display());
+    }
 
     // Copy to clipboard if requested
     if args.clipboard {
-        copy_to_clipboard(&output_path)?;
+        copy_to_clipboard(&actual_output_path)?;
         print_unless_quiet!(quiet, "Screenshot copied to clipboard");
     }
 
-    // Open the screenshot if requested
-    if args.open {
+    // Clean up temp file if no-save mode
+    if is_temp {
+        let _ = fs::remove_file(&actual_output_path);
+    }
+
+    // Open the screenshot if requested (only if saved)
+    if args.open && !args.no_save {
         open_file(&output_path)?;
     }
 
+    Ok(())
+}
+
+/// List available monitors
+pub fn list_monitors() -> Result<()> {
+    if cfg!(windows) {
+        list_monitors_windows()
+    } else if is_wsl() {
+        list_monitors_wsl()
+    } else {
+        bail!("Monitor listing is only supported on Windows and WSL")
+    }
+}
+
+#[cfg(windows)]
+fn list_monitors_windows() -> Result<()> {
+    let ps_script = r#"
+Add-Type -AssemblyName System.Windows.Forms
+$screens = [System.Windows.Forms.Screen]::AllScreens
+$i = 0
+foreach ($screen in $screens) {
+    $primary = if ($screen.Primary) { " (primary)" } else { "" }
+    Write-Host "$i: $($screen.DeviceName)$primary - $($screen.Bounds.Width)x$($screen.Bounds.Height) at ($($screen.Bounds.X),$($screen.Bounds.Y))"
+    $i++
+}
+"#;
+
+    let output = Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", ps_script])
+        .output()
+        .context("Failed to list monitors")?;
+
+    print!("{}", String::from_utf8_lossy(&output.stdout));
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn list_monitors_windows() -> Result<()> {
+    bail!("Windows monitor listing is not available on this platform")
+}
+
+fn list_monitors_wsl() -> Result<()> {
+    let ps_script = r#"
+Add-Type -AssemblyName System.Windows.Forms
+$screens = [System.Windows.Forms.Screen]::AllScreens
+$i = 0
+foreach ($screen in $screens) {
+    $primary = if ($screen.Primary) { " (primary)" } else { "" }
+    Write-Host "$i: $($screen.DeviceName)$primary - $($screen.Bounds.Width)x$($screen.Bounds.Height) at ($($screen.Bounds.X),$($screen.Bounds.Y))"
+    $i++
+}
+"#;
+
+    let output = Command::new("powershell.exe")
+        .args(["-NoProfile", "-NonInteractive", "-Command", ps_script])
+        .output()
+        .context("Failed to list monitors")?;
+
+    print!("{}", String::from_utf8_lossy(&output.stdout));
     Ok(())
 }
 
@@ -208,15 +332,68 @@ pub fn build_output_path(output_dir: &PathBuf, suffix: &Option<String>) -> PathB
     output_dir.join(filename)
 }
 
-/// Capture a screenshot and save it to the specified path
+/// Capture a screenshot and save it to the specified path (primary monitor)
 pub fn capture_screenshot(output_path: &PathBuf) -> Result<()> {
+    capture_screenshot_with_monitor(output_path, &MonitorSelection::Primary)
+}
+
+/// Capture a screenshot with monitor selection
+pub fn capture_screenshot_with_monitor(output_path: &PathBuf, monitor: &MonitorSelection) -> Result<()> {
     if cfg!(windows) {
-        capture_screenshot_windows(output_path)
+        capture_screenshot_windows_with_monitor(output_path, monitor)
     } else if is_wsl() {
-        capture_screenshot_wsl(output_path)
+        capture_screenshot_wsl_with_monitor(output_path, monitor)
     } else {
         bail!("Screenshot capture is only supported on Windows and WSL")
     }
+}
+
+#[cfg(windows)]
+fn capture_screenshot_windows_with_monitor(output_path: &PathBuf, monitor: &MonitorSelection) -> Result<()> {
+    // For now, delegate to the existing function (primary only)
+    // Full multi-monitor support would require more complex GDI code
+    match monitor {
+        MonitorSelection::Primary => capture_screenshot_windows(output_path),
+        _ => {
+            // Use PowerShell for multi-monitor on Windows too
+            let ps_script = generate_powershell_script_with_monitor(
+                &output_path.to_string_lossy(),
+                monitor,
+            );
+            let output = Command::new("powershell")
+                .args(["-NoProfile", "-NonInteractive", "-Command", &ps_script])
+                .output()
+                .context("Failed to execute PowerShell for screenshot capture")?;
+
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                bail!("PowerShell screenshot failed: {}", stderr);
+            }
+            Ok(())
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn capture_screenshot_windows_with_monitor(_output_path: &PathBuf, _monitor: &MonitorSelection) -> Result<()> {
+    bail!("Windows screenshot capture is not available on this platform")
+}
+
+fn capture_screenshot_wsl_with_monitor(output_path: &PathBuf, monitor: &MonitorSelection) -> Result<()> {
+    let windows_path = wsl_to_windows_path(output_path)?;
+    let ps_script = generate_powershell_script_with_monitor(&windows_path, monitor);
+
+    let output = Command::new("powershell.exe")
+        .args(["-NoProfile", "-NonInteractive", "-Command", &ps_script])
+        .output()
+        .context("Failed to execute PowerShell for screenshot capture")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("PowerShell screenshot failed: {}", stderr);
+    }
+
+    Ok(())
 }
 
 /// Determine the capture method based on platform
@@ -400,14 +577,24 @@ fn write_png(path: &PathBuf, data: &[u8], width: u32, height: u32) -> Result<()>
 }
 
 #[cfg(not(windows))]
+#[allow(dead_code)]
 fn capture_screenshot_windows(_output_path: &PathBuf) -> Result<()> {
     bail!("Windows screenshot capture is not available on this platform")
 }
 
-/// Generate the PowerShell script for WSL screenshot capture
+/// Generate the PowerShell script for WSL screenshot capture (primary monitor)
 pub fn generate_powershell_script(windows_path: &str) -> String {
-    format!(
-        r#"
+    generate_powershell_script_with_monitor(windows_path, &MonitorSelection::Primary)
+}
+
+/// Generate PowerShell script with monitor selection
+pub fn generate_powershell_script_with_monitor(windows_path: &str, monitor: &MonitorSelection) -> String {
+    let escaped_path = windows_path.replace('\\', "\\\\").replace('\'', "''");
+
+    match monitor {
+        MonitorSelection::Primary => {
+            format!(
+                r#"
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 
@@ -421,11 +608,73 @@ $bitmap.Save('{}', [System.Drawing.Imaging.ImageFormat]::Png)
 
 $graphics.Dispose()
 $bitmap.Dispose()
-
-Write-Host 'Screenshot captured successfully'
 "#,
-        windows_path.replace('\\', "\\\\").replace('\'', "''")
-    )
+                escaped_path
+            )
+        }
+        MonitorSelection::Index(idx) => {
+            format!(
+                r#"
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
+
+$screens = [System.Windows.Forms.Screen]::AllScreens
+$index = {}
+if ($index -ge $screens.Length) {{
+    Write-Error "Monitor index $index not found. Available: 0-$($screens.Length - 1)"
+    exit 1
+}}
+$screen = $screens[$index]
+$bounds = $screen.Bounds
+$bitmap = New-Object System.Drawing.Bitmap($bounds.Width, $bounds.Height)
+$graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+$graphics.CopyFromScreen($bounds.Location, [System.Drawing.Point]::Empty, $bounds.Size)
+
+$bitmap.Save('{}', [System.Drawing.Imaging.ImageFormat]::Png)
+
+$graphics.Dispose()
+$bitmap.Dispose()
+"#,
+                idx, escaped_path
+            )
+        }
+        MonitorSelection::All => {
+            format!(
+                r#"
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
+
+$screens = [System.Windows.Forms.Screen]::AllScreens
+
+# Calculate the bounding rectangle for all screens
+$minX = ($screens | ForEach-Object {{ $_.Bounds.X }} | Measure-Object -Minimum).Minimum
+$minY = ($screens | ForEach-Object {{ $_.Bounds.Y }} | Measure-Object -Minimum).Minimum
+$maxX = ($screens | ForEach-Object {{ $_.Bounds.X + $_.Bounds.Width }} | Measure-Object -Maximum).Maximum
+$maxY = ($screens | ForEach-Object {{ $_.Bounds.Y + $_.Bounds.Height }} | Measure-Object -Maximum).Maximum
+
+$totalWidth = $maxX - $minX
+$totalHeight = $maxY - $minY
+
+$bitmap = New-Object System.Drawing.Bitmap($totalWidth, $totalHeight)
+$graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+
+# Capture each screen
+foreach ($screen in $screens) {{
+    $bounds = $screen.Bounds
+    $offsetX = $bounds.X - $minX
+    $offsetY = $bounds.Y - $minY
+    $graphics.CopyFromScreen($bounds.Location, (New-Object System.Drawing.Point($offsetX, $offsetY)), $bounds.Size)
+}}
+
+$bitmap.Save('{}', [System.Drawing.Imaging.ImageFormat]::Png)
+
+$graphics.Dispose()
+$bitmap.Dispose()
+"#,
+                escaped_path
+            )
+        }
+    }
 }
 
 /// Capture screenshot from WSL using PowerShell
@@ -800,6 +1049,9 @@ mod tests {
         assert!(!args.dry_run);
         assert!(!args.quiet);
         assert!(!args.clipboard);
+        assert!(!args.no_save);
+        assert_eq!(args.monitor, "primary");
+        assert!(!args.list_monitors);
     }
 
     #[test]
@@ -864,6 +1116,9 @@ mod tests {
             "--dry-run",
             "--quiet",
             "--clipboard",
+            "--no-save",
+            "--monitor",
+            "1",
         ])
         .unwrap();
         assert_eq!(args.name, Some("test".to_string()));
@@ -873,6 +1128,8 @@ mod tests {
         assert!(args.dry_run);
         assert!(args.quiet);
         assert!(args.clipboard);
+        assert!(args.no_save);
+        assert_eq!(args.monitor, "1");
     }
 
     #[test]
@@ -916,6 +1173,77 @@ mod tests {
         let args = Args::try_parse_from(["mdscreensnap", "-q", "-c"]).unwrap();
         assert!(args.quiet);
         assert!(args.clipboard);
+    }
+
+    #[test]
+    fn test_args_parse_no_save() {
+        let args = Args::try_parse_from(["mdscreensnap", "--clipboard", "--no-save"]).unwrap();
+        assert!(args.clipboard);
+        assert!(args.no_save);
+    }
+
+    #[test]
+    fn test_args_parse_no_save_requires_clipboard() {
+        // --no-save without --clipboard should fail
+        let result = Args::try_parse_from(["mdscreensnap", "--no-save"]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_args_parse_monitor() {
+        let args = Args::try_parse_from(["mdscreensnap", "-m", "1"]).unwrap();
+        assert_eq!(args.monitor, "1");
+    }
+
+    #[test]
+    fn test_args_parse_monitor_all() {
+        let args = Args::try_parse_from(["mdscreensnap", "--monitor", "all"]).unwrap();
+        assert_eq!(args.monitor, "all");
+    }
+
+    #[test]
+    fn test_args_parse_list_monitors() {
+        let args = Args::try_parse_from(["mdscreensnap", "--list-monitors"]).unwrap();
+        assert!(args.list_monitors);
+    }
+
+    // ==================== Monitor Selection Tests ====================
+
+    #[test]
+    fn test_parse_monitor_selection_primary() {
+        assert_eq!(parse_monitor_selection("primary"), MonitorSelection::Primary);
+    }
+
+    #[test]
+    fn test_parse_monitor_selection_all() {
+        assert_eq!(parse_monitor_selection("all"), MonitorSelection::All);
+    }
+
+    #[test]
+    fn test_parse_monitor_selection_index() {
+        assert_eq!(parse_monitor_selection("0"), MonitorSelection::Index(0));
+        assert_eq!(parse_monitor_selection("1"), MonitorSelection::Index(1));
+        assert_eq!(parse_monitor_selection("2"), MonitorSelection::Index(2));
+    }
+
+    #[test]
+    fn test_parse_monitor_selection_case_insensitive() {
+        assert_eq!(parse_monitor_selection("PRIMARY"), MonitorSelection::Primary);
+        assert_eq!(parse_monitor_selection("All"), MonitorSelection::All);
+        assert_eq!(parse_monitor_selection("ALL"), MonitorSelection::All);
+    }
+
+    #[test]
+    fn test_parse_monitor_selection_invalid_defaults_to_primary() {
+        assert_eq!(parse_monitor_selection("invalid"), MonitorSelection::Primary);
+        assert_eq!(parse_monitor_selection(""), MonitorSelection::Primary);
+    }
+
+    #[test]
+    fn test_monitor_selection_display() {
+        assert_eq!(format!("{}", MonitorSelection::Primary), "primary");
+        assert_eq!(format!("{}", MonitorSelection::All), "all");
+        assert_eq!(format!("{}", MonitorSelection::Index(1)), "1");
     }
 
     // ==================== Output Path Building Tests ====================
@@ -995,6 +1323,32 @@ mod tests {
         assert!(script.contains("Dispose()"));
     }
 
+    // ==================== PowerShell Script with Monitor Tests ====================
+
+    #[test]
+    fn test_generate_powershell_script_primary_monitor() {
+        let script = generate_powershell_script_with_monitor("C:\\test.png", &MonitorSelection::Primary);
+        assert!(script.contains("PrimaryScreen"));
+        assert!(script.contains("C:\\\\test.png"));
+    }
+
+    #[test]
+    fn test_generate_powershell_script_index_monitor() {
+        let script = generate_powershell_script_with_monitor("C:\\test.png", &MonitorSelection::Index(1));
+        assert!(script.contains("AllScreens"));
+        assert!(script.contains("$index = 1"));
+        assert!(script.contains("C:\\\\test.png"));
+    }
+
+    #[test]
+    fn test_generate_powershell_script_all_monitors() {
+        let script = generate_powershell_script_with_monitor("C:\\test.png", &MonitorSelection::All);
+        assert!(script.contains("AllScreens"));
+        assert!(script.contains("$totalWidth"));
+        assert!(script.contains("$totalHeight"));
+        assert!(script.contains("foreach"));
+    }
+
     // ==================== Clipboard Tests ====================
 
     #[test]
@@ -1029,6 +1383,9 @@ mod tests {
             dry_run: true,
             quiet: false,
             clipboard: false,
+            no_save: false,
+            monitor: "primary".to_string(),
+            list_monitors: false,
         };
 
         let result = run(args);
@@ -1052,6 +1409,9 @@ mod tests {
             dry_run: true,
             quiet: false,
             clipboard: false,
+            no_save: false,
+            monitor: "primary".to_string(),
+            list_monitors: false,
         };
 
         let result = run(args);
@@ -1070,6 +1430,9 @@ mod tests {
             dry_run: true,
             quiet: true,
             clipboard: false,
+            no_save: false,
+            monitor: "primary".to_string(),
+            list_monitors: false,
         };
 
         // Should succeed without errors

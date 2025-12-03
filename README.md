@@ -7,9 +7,10 @@ A simple command-line screenshot tool for Windows and WSL.
 - Cross-platform support for Windows (native) and WSL
 - Automatic date-based file naming (YYYY.MM.DD_HHMMSS format)
 - Saves to system temporary directory by default
+- Multi-monitor support (primary, specific, or all monitors)
+- Copy to clipboard support (with optional no-save mode)
 - Optional delay before capture
 - Custom output directory support
-- Copy to clipboard support
 - Open screenshot after capture
 - Quiet mode for scripting
 
@@ -49,11 +50,25 @@ mdscreensnap --open
 # Take a screenshot and copy to clipboard
 mdscreensnap --clipboard
 
+# Copy to clipboard only (no file saved)
+mdscreensnap --clipboard --no-save
+
 # Show where the screenshot would be saved (dry run)
 mdscreensnap --dry-run
 
 # Silent mode for scripting (only outputs path on dry-run)
 mdscreensnap --quiet
+
+# Multi-monitor: capture specific monitor (0-indexed)
+mdscreensnap --monitor 0    # First monitor
+mdscreensnap --monitor 1    # Second monitor
+mdscreensnap -m 2           # Third monitor
+
+# Multi-monitor: capture all monitors stitched together
+mdscreensnap --monitor all
+
+# List available monitors
+mdscreensnap --list-monitors
 
 # Combine options
 mdscreensnap --name feature-demo --delay 5 --open --clipboard
@@ -61,6 +76,9 @@ mdscreensnap --name feature-demo --delay 5 --open --clipboard
 # Use in scripts (get path, capture silently)
 SCREENSHOT_PATH=$(mdscreensnap --dry-run)
 mdscreensnap -q -c  # Capture silently with clipboard
+
+# Quick clipboard-only capture
+mdscreensnap -c --no-save -q
 ```
 
 ## Options
@@ -70,10 +88,13 @@ mdscreensnap -q -c  # Capture silently with clipboard
 | `--name` | `-n` | Custom filename suffix (appended after the date) |
 | `--output` | `-o` | Output directory (defaults to system temp directory) |
 | `--delay` | `-d` | Delay in seconds before taking the screenshot (default: 0) |
+| `--monitor` | `-m` | Monitor to capture: 0, 1, 2... or "all" (default: primary) |
 | `--open` | | Open the screenshot after saving |
 | `--clipboard` | `-c` | Copy screenshot to clipboard (in addition to file) |
+| `--no-save` | | Don't save to file, only copy to clipboard (requires --clipboard) |
 | `--quiet` | `-q` | Suppress all output (quiet mode for scripting) |
 | `--dry-run` | | Print the output path without capturing |
+| `--list-monitors` | | List available monitors and exit |
 | `--help` | `-h` | Show help information |
 | `--version` | `-V` | Show version information |
 
@@ -93,7 +114,7 @@ Examples:
 
 ### Windows (Native)
 
-On native Windows, the tool uses Win32 GDI API to capture the primary screen.
+On native Windows, the tool uses Win32 GDI API for primary monitor capture, and PowerShell for multi-monitor or specific monitor capture.
 
 ### WSL (Windows Subsystem for Linux)
 
@@ -102,6 +123,7 @@ When running under WSL, the tool:
 2. Uses PowerShell to capture the Windows desktop
 3. Saves to the Windows temp directory by default for better compatibility
 4. Supports path conversion between WSL and Windows
+5. Full multi-monitor support
 
 ## Requirements
 
