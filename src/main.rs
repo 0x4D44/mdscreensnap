@@ -94,7 +94,7 @@ impl std::fmt::Display for MonitorSelection {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             MonitorSelection::Primary => write!(f, "primary"),
-            MonitorSelection::Index(i) => write!(f, "{}", i),
+            MonitorSelection::Index(i) => write!(f, "{i}"),
             MonitorSelection::All => write!(f, "all"),
         }
     }
@@ -117,7 +117,7 @@ pub fn run(args: Args) -> Result<()> {
 
     // Ensure output directory exists
     fs::create_dir_all(&output_dir)
-        .with_context(|| format!("Failed to create output directory: {:?}", output_dir))?;
+        .with_context(|| format!("Failed to create output directory: {output_dir:?}"))?;
 
     // Generate filename with YYYY.MM.DD prefix
     let filename = generate_filename(&args.name);
@@ -137,7 +137,8 @@ pub fn run(args: Args) -> Result<()> {
 
     // For no-save mode, use a temp file
     let (actual_output_path, is_temp) = if args.no_save {
-        let temp_path = env::temp_dir().join(format!("mdscreensnap_temp_{}.png", std::process::id()));
+        let temp_path =
+            env::temp_dir().join(format!("mdscreensnap_temp_{}.png", std::process::id()));
         (temp_path, true)
     } else {
         (output_path.clone(), false)
@@ -297,7 +298,7 @@ pub fn generate_filename(suffix: &Option<String>) -> String {
 pub fn generate_filename_with_datetime(suffix: &Option<String>, date_prefix: String) -> String {
     match suffix {
         Some(s) => format!("{}_{}.png", date_prefix, sanitize_filename(s)),
-        None => format!("{}.png", date_prefix),
+        None => format!("{date_prefix}.png"),
     }
 }
 
@@ -327,18 +328,21 @@ pub fn is_invalid_filename_char(c: char) -> bool {
 }
 
 /// Build the full output path from directory and filename
-pub fn build_output_path(output_dir: &PathBuf, suffix: &Option<String>) -> PathBuf {
+pub fn build_output_path(output_dir: &std::path::Path, suffix: &Option<String>) -> PathBuf {
     let filename = generate_filename(suffix);
     output_dir.join(filename)
 }
 
 /// Capture a screenshot and save it to the specified path (primary monitor)
-pub fn capture_screenshot(output_path: &PathBuf) -> Result<()> {
+pub fn capture_screenshot(output_path: &std::path::Path) -> Result<()> {
     capture_screenshot_with_monitor(output_path, &MonitorSelection::Primary)
 }
 
 /// Capture a screenshot with monitor selection
-pub fn capture_screenshot_with_monitor(output_path: &PathBuf, monitor: &MonitorSelection) -> Result<()> {
+pub fn capture_screenshot_with_monitor(
+    output_path: &std::path::Path,
+    monitor: &MonitorSelection,
+) -> Result<()> {
     if cfg!(windows) {
         capture_screenshot_windows_with_monitor(output_path, monitor)
     } else if is_wsl() {
@@ -349,37 +353,37 @@ pub fn capture_screenshot_with_monitor(output_path: &PathBuf, monitor: &MonitorS
 }
 
 #[cfg(windows)]
-fn capture_screenshot_windows_with_monitor(output_path: &PathBuf, monitor: &MonitorSelection) -> Result<()> {
-    // For now, delegate to the existing function (primary only)
-    // Full multi-monitor support would require more complex GDI code
-    match monitor {
-        MonitorSelection::Primary => capture_screenshot_windows(output_path),
-        _ => {
-            // Use PowerShell for multi-monitor on Windows too
-            let ps_script = generate_powershell_script_with_monitor(
-                &output_path.to_string_lossy(),
-                monitor,
-            );
-            let output = Command::new("powershell")
-                .args(["-NoProfile", "-NonInteractive", "-Command", &ps_script])
-                .output()
-                .context("Failed to execute PowerShell for screenshot capture")?;
+fn capture_screenshot_windows_with_monitor(
+    output_path: &std::path::Path,
+    monitor: &MonitorSelection,
+) -> Result<()> {
+    // Use PowerShell for all captures - consistent PNG output
+    let ps_script =
+        generate_powershell_script_with_monitor(&output_path.to_string_lossy(), monitor);
+    let output = Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", &ps_script])
+        .output()
+        .context("Failed to execute PowerShell for screenshot capture")?;
 
-            if !output.status.success() {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                bail!("PowerShell screenshot failed: {}", stderr);
-            }
-            Ok(())
-        }
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("PowerShell screenshot failed: {stderr}");
     }
+    Ok(())
 }
 
 #[cfg(not(windows))]
-fn capture_screenshot_windows_with_monitor(_output_path: &PathBuf, _monitor: &MonitorSelection) -> Result<()> {
+fn capture_screenshot_windows_with_monitor(
+    _output_path: &std::path::Path,
+    _monitor: &MonitorSelection,
+) -> Result<()> {
     bail!("Windows screenshot capture is not available on this platform")
 }
 
-fn capture_screenshot_wsl_with_monitor(output_path: &PathBuf, monitor: &MonitorSelection) -> Result<()> {
+fn capture_screenshot_wsl_with_monitor(
+    output_path: &std::path::Path,
+    monitor: &MonitorSelection,
+) -> Result<()> {
     let windows_path = wsl_to_windows_path(output_path)?;
     let ps_script = generate_powershell_script_with_monitor(&windows_path, monitor);
 
@@ -390,7 +394,7 @@ fn capture_screenshot_wsl_with_monitor(output_path: &PathBuf, monitor: &MonitorS
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!("PowerShell screenshot failed: {}", stderr);
+        bail!("PowerShell screenshot failed: {stderr}");
     }
 
     Ok(())
@@ -418,168 +422,11 @@ pub enum CaptureMethod {
 impl std::fmt::Display for CaptureMethod {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            CaptureMethod::Windows => write!(f, "Windows (GDI)"),
+            CaptureMethod::Windows => write!(f, "Windows (PowerShell)"),
             CaptureMethod::Wsl => write!(f, "WSL (PowerShell)"),
             CaptureMethod::Unsupported => write!(f, "Unsupported"),
         }
     }
-}
-
-/// Capture screenshot on native Windows
-#[cfg(windows)]
-fn capture_screenshot_windows(output_path: &PathBuf) -> Result<()> {
-    use windows::Win32::Foundation::*;
-    use windows::Win32::Graphics::Gdi::*;
-    use windows::Win32::UI::WindowsAndMessaging::*;
-
-    unsafe {
-        // Get the screen dimensions
-        let screen_width = GetSystemMetrics(SM_CXSCREEN);
-        let screen_height = GetSystemMetrics(SM_CYSCREEN);
-
-        // Get the device context for the entire screen
-        let screen_dc = GetDC(HWND(std::ptr::null_mut()));
-        if screen_dc.is_invalid() {
-            bail!("Failed to get screen device context");
-        }
-
-        // Create a compatible DC and bitmap
-        let mem_dc = CreateCompatibleDC(screen_dc);
-        if mem_dc.is_invalid() {
-            ReleaseDC(HWND(std::ptr::null_mut()), screen_dc);
-            bail!("Failed to create compatible DC");
-        }
-
-        let bitmap = CreateCompatibleBitmap(screen_dc, screen_width, screen_height);
-        if bitmap.is_invalid() {
-            DeleteDC(mem_dc);
-            ReleaseDC(HWND(std::ptr::null_mut()), screen_dc);
-            bail!("Failed to create compatible bitmap");
-        }
-
-        let old_bitmap = SelectObject(mem_dc, bitmap);
-
-        // Copy the screen to the bitmap
-        let result = BitBlt(
-            mem_dc,
-            0,
-            0,
-            screen_width,
-            screen_height,
-            screen_dc,
-            0,
-            0,
-            SRCCOPY,
-        );
-
-        if !result.as_bool() {
-            SelectObject(mem_dc, old_bitmap);
-            DeleteObject(bitmap);
-            DeleteDC(mem_dc);
-            ReleaseDC(HWND(std::ptr::null_mut()), screen_dc);
-            bail!("Failed to capture screen");
-        }
-
-        // Get bitmap info
-        let mut bitmap_info = BITMAPINFO {
-            bmiHeader: BITMAPINFOHEADER {
-                biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
-                biWidth: screen_width,
-                biHeight: -screen_height, // Negative for top-down
-                biPlanes: 1,
-                biBitCount: 32,
-                biCompression: BI_RGB.0,
-                biSizeImage: 0,
-                biXPelsPerMeter: 0,
-                biYPelsPerMeter: 0,
-                biClrUsed: 0,
-                biClrImportant: 0,
-            },
-            bmiColors: [RGBQUAD::default()],
-        };
-
-        // Calculate buffer size and allocate
-        let row_size = ((screen_width * 4 + 3) & !3) as usize;
-        let buffer_size = row_size * screen_height as usize;
-        let mut buffer = vec![0u8; buffer_size];
-
-        // Get the bitmap bits
-        let result = GetDIBits(
-            mem_dc,
-            bitmap,
-            0,
-            screen_height as u32,
-            Some(buffer.as_mut_ptr() as *mut _),
-            &mut bitmap_info,
-            DIB_RGB_COLORS,
-        );
-
-        // Clean up GDI objects
-        SelectObject(mem_dc, old_bitmap);
-        DeleteObject(bitmap);
-        DeleteDC(mem_dc);
-        ReleaseDC(HWND(std::ptr::null_mut()), screen_dc);
-
-        if result == 0 {
-            bail!("Failed to get bitmap bits");
-        }
-
-        // Convert BGRA to RGBA
-        for i in (0..buffer.len()).step_by(4) {
-            buffer.swap(i, i + 2);
-        }
-
-        // Write as PNG (simple BMP for now, or use image crate)
-        write_png(output_path, &buffer, screen_width as u32, screen_height as u32)?;
-
-        Ok(())
-    }
-}
-
-#[cfg(windows)]
-fn write_png(path: &PathBuf, data: &[u8], width: u32, height: u32) -> Result<()> {
-    use std::io::Write;
-
-    // Write as BMP since we don't have image crate on Windows target
-    let file_size = 54 + data.len() as u32;
-    let mut file = fs::File::create(path.with_extension("bmp"))?;
-
-    // BMP Header
-    file.write_all(&[0x42, 0x4D])?; // BM
-    file.write_all(&file_size.to_le_bytes())?;
-    file.write_all(&[0, 0, 0, 0])?; // Reserved
-    file.write_all(&54u32.to_le_bytes())?; // Offset to pixel data
-
-    // DIB Header
-    file.write_all(&40u32.to_le_bytes())?; // Header size
-    file.write_all(&width.to_le_bytes())?;
-    file.write_all(&(-(height as i32)).to_le_bytes())?; // Negative for top-down
-    file.write_all(&1u16.to_le_bytes())?; // Planes
-    file.write_all(&32u16.to_le_bytes())?; // Bits per pixel
-    file.write_all(&0u32.to_le_bytes())?; // Compression
-    file.write_all(&(data.len() as u32).to_le_bytes())?; // Image size
-    file.write_all(&0u32.to_le_bytes())?; // X pixels per meter
-    file.write_all(&0u32.to_le_bytes())?; // Y pixels per meter
-    file.write_all(&0u32.to_le_bytes())?; // Colors used
-    file.write_all(&0u32.to_le_bytes())?; // Important colors
-
-    // Convert RGBA back to BGRA for BMP
-    let mut bgra_data = data.to_vec();
-    for i in (0..bgra_data.len()).step_by(4) {
-        bgra_data.swap(i, i + 2);
-    }
-    file.write_all(&bgra_data)?;
-
-    // Update the output path to use .bmp extension
-    println!("Note: Saved as BMP format");
-
-    Ok(())
-}
-
-#[cfg(not(windows))]
-#[allow(dead_code)]
-fn capture_screenshot_windows(_output_path: &PathBuf) -> Result<()> {
-    bail!("Windows screenshot capture is not available on this platform")
 }
 
 /// Generate the PowerShell script for WSL screenshot capture (primary monitor)
@@ -588,7 +435,11 @@ pub fn generate_powershell_script(windows_path: &str) -> String {
 }
 
 /// Generate PowerShell script with monitor selection
-pub fn generate_powershell_script_with_monitor(windows_path: &str, monitor: &MonitorSelection) -> String {
+#[allow(clippy::uninlined_format_args)]
+pub fn generate_powershell_script_with_monitor(
+    windows_path: &str,
+    monitor: &MonitorSelection,
+) -> String {
     let escaped_path = windows_path.replace('\\', "\\\\").replace('\'', "''");
 
     match monitor {
@@ -678,7 +529,7 @@ $bitmap.Dispose()
 }
 
 /// Capture screenshot from WSL using PowerShell
-pub fn capture_screenshot_wsl(output_path: &PathBuf) -> Result<()> {
+pub fn capture_screenshot_wsl(output_path: &std::path::Path) -> Result<()> {
     // Convert WSL path to Windows path for PowerShell
     let windows_path = wsl_to_windows_path(output_path)?;
 
@@ -692,14 +543,14 @@ pub fn capture_screenshot_wsl(output_path: &PathBuf) -> Result<()> {
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!("PowerShell screenshot failed: {}", stderr);
+        bail!("PowerShell screenshot failed: {stderr}");
     }
 
     Ok(())
 }
 
 /// Convert WSL path to Windows path
-pub fn wsl_to_windows_path(path: &PathBuf) -> Result<String> {
+pub fn wsl_to_windows_path(path: &std::path::Path) -> Result<String> {
     let output = Command::new("wslpath")
         .args(["-w", &path.to_string_lossy()])
         .output()
@@ -713,7 +564,7 @@ pub fn wsl_to_windows_path(path: &PathBuf) -> Result<String> {
 }
 
 /// Copy a screenshot to the clipboard
-pub fn copy_to_clipboard(path: &PathBuf) -> Result<()> {
+pub fn copy_to_clipboard(path: &std::path::Path) -> Result<()> {
     if cfg!(windows) {
         copy_to_clipboard_windows(path)
     } else if is_wsl() {
@@ -725,7 +576,7 @@ pub fn copy_to_clipboard(path: &PathBuf) -> Result<()> {
 
 /// Copy to clipboard on native Windows using PowerShell
 #[cfg(windows)]
-fn copy_to_clipboard_windows(path: &PathBuf) -> Result<()> {
+fn copy_to_clipboard_windows(path: &std::path::Path) -> Result<()> {
     let ps_script = format!(
         r#"
 Add-Type -AssemblyName System.Windows.Forms
@@ -743,19 +594,19 @@ $image.Dispose()
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!("Clipboard copy failed: {}", stderr);
+        bail!("Clipboard copy failed: {stderr}");
     }
 
     Ok(())
 }
 
 #[cfg(not(windows))]
-fn copy_to_clipboard_windows(_path: &PathBuf) -> Result<()> {
+fn copy_to_clipboard_windows(_path: &std::path::Path) -> Result<()> {
     bail!("Windows clipboard copy is not available on this platform")
 }
 
 /// Copy to clipboard from WSL using PowerShell
-fn copy_to_clipboard_wsl(path: &PathBuf) -> Result<()> {
+fn copy_to_clipboard_wsl(path: &std::path::Path) -> Result<()> {
     let windows_path = wsl_to_windows_path(path)?;
 
     let ps_script = format!(
@@ -775,14 +626,14 @@ $image.Dispose()
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!("Clipboard copy failed: {}", stderr);
+        bail!("Clipboard copy failed: {stderr}");
     }
 
     Ok(())
 }
 
 /// Open a file with the default application
-pub fn open_file(path: &PathBuf) -> Result<()> {
+pub fn open_file(path: &std::path::Path) -> Result<()> {
     if cfg!(windows) {
         Command::new("cmd")
             .args(["/C", "start", "", &path.to_string_lossy()])
@@ -907,7 +758,10 @@ mod tests {
 
     #[test]
     fn test_sanitize_filename_normal() {
-        assert_eq!(sanitize_filename("normal-file_name.txt"), "normal-file_name.txt");
+        assert_eq!(
+            sanitize_filename("normal-file_name.txt"),
+            "normal-file_name.txt"
+        );
     }
 
     #[test]
@@ -969,7 +823,9 @@ mod tests {
 
     #[test]
     fn test_validate_filename_format_valid_with_suffix() {
-        assert!(validate_filename_format("2025.12.03_143052_my-screenshot.png"));
+        assert!(validate_filename_format(
+            "2025.12.03_143052_my-screenshot.png"
+        ));
     }
 
     #[test]
@@ -1211,7 +1067,10 @@ mod tests {
 
     #[test]
     fn test_parse_monitor_selection_primary() {
-        assert_eq!(parse_monitor_selection("primary"), MonitorSelection::Primary);
+        assert_eq!(
+            parse_monitor_selection("primary"),
+            MonitorSelection::Primary
+        );
     }
 
     #[test]
@@ -1228,14 +1087,20 @@ mod tests {
 
     #[test]
     fn test_parse_monitor_selection_case_insensitive() {
-        assert_eq!(parse_monitor_selection("PRIMARY"), MonitorSelection::Primary);
+        assert_eq!(
+            parse_monitor_selection("PRIMARY"),
+            MonitorSelection::Primary
+        );
         assert_eq!(parse_monitor_selection("All"), MonitorSelection::All);
         assert_eq!(parse_monitor_selection("ALL"), MonitorSelection::All);
     }
 
     #[test]
     fn test_parse_monitor_selection_invalid_defaults_to_primary() {
-        assert_eq!(parse_monitor_selection("invalid"), MonitorSelection::Primary);
+        assert_eq!(
+            parse_monitor_selection("invalid"),
+            MonitorSelection::Primary
+        );
         assert_eq!(parse_monitor_selection(""), MonitorSelection::Primary);
     }
 
@@ -1268,7 +1133,7 @@ mod tests {
 
     #[test]
     fn test_capture_method_display_windows() {
-        assert_eq!(format!("{}", CaptureMethod::Windows), "Windows (GDI)");
+        assert_eq!(format!("{}", CaptureMethod::Windows), "Windows (PowerShell)");
     }
 
     #[test]
@@ -1327,14 +1192,16 @@ mod tests {
 
     #[test]
     fn test_generate_powershell_script_primary_monitor() {
-        let script = generate_powershell_script_with_monitor("C:\\test.png", &MonitorSelection::Primary);
+        let script =
+            generate_powershell_script_with_monitor("C:\\test.png", &MonitorSelection::Primary);
         assert!(script.contains("PrimaryScreen"));
         assert!(script.contains("C:\\\\test.png"));
     }
 
     #[test]
     fn test_generate_powershell_script_index_monitor() {
-        let script = generate_powershell_script_with_monitor("C:\\test.png", &MonitorSelection::Index(1));
+        let script =
+            generate_powershell_script_with_monitor("C:\\test.png", &MonitorSelection::Index(1));
         assert!(script.contains("AllScreens"));
         assert!(script.contains("$index = 1"));
         assert!(script.contains("C:\\\\test.png"));
@@ -1342,7 +1209,8 @@ mod tests {
 
     #[test]
     fn test_generate_powershell_script_all_monitors() {
-        let script = generate_powershell_script_with_monitor("C:\\test.png", &MonitorSelection::All);
+        let script =
+            generate_powershell_script_with_monitor("C:\\test.png", &MonitorSelection::All);
         assert!(script.contains("AllScreens"));
         assert!(script.contains("$totalWidth"));
         assert!(script.contains("$totalHeight"));
