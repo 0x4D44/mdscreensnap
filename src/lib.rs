@@ -15,6 +15,10 @@ use runtime::Runtime;
 #[command(version)]
 #[command(about = "Capture screenshots and save them to the temporary directory", long_about = None)]
 pub struct Args {
+    /// Output file path (e.g. screenshot.png). Overrides --name and --output.
+    #[arg(conflicts_with_all = ["name", "output"])]
+    pub file: Option<PathBuf>,
+
     /// Custom filename suffix (optional, will be appended after the date)
     #[arg(short, long)]
     pub name: Option<String>,
@@ -107,16 +111,30 @@ pub fn run(args: Args, rt: &impl Runtime) -> Result<()> {
     // Parse monitor selection
     let monitor = parse_monitor_selection(&args.monitor);
 
-    // Determine the output directory
-    let output_dir = args.output.unwrap_or_else(|| get_temp_dir(rt));
-
-    // Ensure output directory exists
-    rt.create_dir_all(&output_dir)
-        .with_context(|| format!("Failed to create output directory: {output_dir:?}"))?;
-
-    // Generate filename with YYYY.MM.DD prefix
-    let filename = generate_filename(&args.name);
-    let output_path = output_dir.join(&filename);
+    // Determine output path: positional arg takes priority, otherwise auto-generate
+    let output_path = if let Some(file) = args.file {
+        // Explicit file path: ensure .png extension and parent directory exists
+        let file = if file.extension().is_none() {
+            file.with_extension("png")
+        } else {
+            file
+        };
+        let parent = file.parent().unwrap_or(Path::new("."));
+        rt.create_dir_all(parent)
+            .with_context(|| format!("Failed to create output directory: {parent:?}"))?;
+        // Resolve relative paths against current directory
+        if file.is_relative() {
+            std::env::current_dir()?.join(&file)
+        } else {
+            file
+        }
+    } else {
+        let output_dir = args.output.unwrap_or_else(|| get_temp_dir(rt));
+        rt.create_dir_all(&output_dir)
+            .with_context(|| format!("Failed to create output directory: {output_dir:?}"))?;
+        let filename = generate_filename(&args.name);
+        output_dir.join(&filename)
+    };
 
     if args.dry_run {
         // Always print path in dry-run mode (that's the point)
@@ -184,7 +202,7 @@ fn list_monitors_windows(rt: &impl Runtime) -> Result<()> {
     $i = 0
     foreach ($screen in $screens) {
         $primary = if ($screen.Primary) { " (primary)" } else { "" }
-        Write-Host "$i: $($screen.DeviceName)$primary - $($screen.Bounds.Width)x$($screen.Bounds.Height) at ($($screen.Bounds.X),$($screen.Bounds.Y))"
+        Write-Host "${i}: $($screen.DeviceName)$primary - $($screen.Bounds.Width)x$($screen.Bounds.Height) at ($($screen.Bounds.X),$($screen.Bounds.Y))"
         $i++
     }
     "#;
@@ -204,7 +222,7 @@ fn list_monitors_wsl(rt: &impl Runtime) -> Result<()> {
     $i = 0
     foreach ($screen in $screens) {
         $primary = if ($screen.Primary) { " (primary)" } else { "" }
-        Write-Host "$i: $($screen.DeviceName)$primary - $($screen.Bounds.Width)x$($screen.Bounds.Height) at ($($screen.Bounds.X),$($screen.Bounds.Y))"
+        Write-Host "${i}: $($screen.DeviceName)$primary - $($screen.Bounds.Width)x$($screen.Bounds.Height) at ($($screen.Bounds.X),$($screen.Bounds.Y))"
         $i++
     }
     "#;
@@ -412,8 +430,13 @@ $minY = ($screens | ForEach-Object {{ $_.Bounds.Y }} | Measure-Object -Minimum).
 $maxX = ($screens | ForEach-Object {{ $_.Bounds.X + $_.Bounds.Width }} | Measure-Object -Maximum).Maximum
 $maxY = ($screens | ForEach-Object {{ $_.Bounds.Y + $_.Bounds.Height }} | Measure-Object -Maximum).Maximum
 
-$totalWidth = $maxX - $minX
-$totalHeight = $maxY - $minY
+$totalWidth = [int]($maxX - $minX)
+$totalHeight = [int]($maxY - $minY)
+
+if ($totalWidth -le 0 -or $totalHeight -le 0) {{
+    Write-Error "Invalid screen dimensions: ${{totalWidth}}x${{totalHeight}}"
+    exit 1
+}}
 
 $bitmap = New-Object System.Drawing.Bitmap($totalWidth, $totalHeight)
 $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
@@ -670,6 +693,7 @@ mod tests {
     fn test_run_dry_run() {
         let rt = MockRuntime::new(Platform::Windows);
         let args = Args {
+            file: None,
             dry_run: true,
             monitor: "primary".to_string(),
             name: None,
@@ -692,6 +716,7 @@ mod tests {
     fn test_run_capture_windows_primary() {
         let rt = MockRuntime::new(Platform::Windows);
         let args = Args {
+            file: None,
             dry_run: false,
             monitor: "primary".to_string(),
             name: Some("test".to_string()),
@@ -727,6 +752,7 @@ mod tests {
         );
 
         let args = Args {
+            file: None,
             dry_run: false,
             monitor: "primary".to_string(),
             name: None,
@@ -753,6 +779,7 @@ mod tests {
     fn test_run_delay() {
         let rt = MockRuntime::new(Platform::Windows);
         let args = Args {
+            file: None,
             dry_run: false,
             monitor: "primary".to_string(),
             name: None,
@@ -776,6 +803,7 @@ mod tests {
     fn test_run_clipboard_only_no_save() {
         let rt = MockRuntime::new(Platform::Windows);
         let args = Args {
+            file: None,
             dry_run: false,
             monitor: "primary".to_string(),
             name: None,
@@ -809,6 +837,7 @@ mod tests {
     fn test_run_open_file() {
         let rt = MockRuntime::new(Platform::Windows);
         let args = Args {
+            file: None,
             dry_run: false,
             monitor: "primary".to_string(),
             name: None,
@@ -834,6 +863,7 @@ mod tests {
     fn test_list_monitors_windows() {
         let rt = MockRuntime::new(Platform::Windows);
         let args = Args {
+            file: None,
             dry_run: false,
             monitor: "primary".to_string(),
             name: None,
@@ -889,6 +919,7 @@ mod tests {
     fn test_unsupported_platform() {
         let rt = MockRuntime::new(Platform::Linux);
         let args = Args {
+            file: None,
             dry_run: false,
             monitor: "primary".to_string(),
             name: None,
@@ -956,6 +987,7 @@ mod tests {
             .insert(PathBuf::from("/proc/version"), "Linux ... WSL2".to_string());
 
         let args = Args {
+            file: None,
             dry_run: false,
 
             monitor: "primary".to_string(),
@@ -1000,6 +1032,7 @@ mod tests {
         let rt = MockRuntime::new(Platform::Windows);
 
         let args = Args {
+            file: None,
             dry_run: false,
 
             monitor: "all".to_string(),
@@ -1040,6 +1073,7 @@ mod tests {
         let rt = MockRuntime::new(Platform::Windows);
 
         let args = Args {
+            file: None,
             dry_run: false,
 
             monitor: "1".to_string(),
@@ -1093,6 +1127,7 @@ mod tests {
         let rt = MockRuntime::new(Platform::Linux);
 
         let args = Args {
+            file: None,
             dry_run: false,
 
             monitor: "primary".to_string(),
@@ -1122,5 +1157,64 @@ mod tests {
             result.unwrap_err().to_string(),
             "Monitor listing is only supported on Windows and WSL"
         );
+    }
+
+    #[test]
+    fn test_run_positional_file_arg() {
+        let rt = MockRuntime::new(Platform::Windows);
+        let args = Args {
+            file: Some(PathBuf::from("C:\\Screenshots\\capture.png")),
+            dry_run: true,
+            monitor: "primary".to_string(),
+            name: None,
+            output: None,
+            delay: 0,
+            open: false,
+            quiet: false,
+            clipboard: false,
+            no_save: false,
+            list_monitors: false,
+        };
+
+        run(args, &rt).unwrap();
+
+        // dry_run just prints path, no commands executed
+        assert!(rt.cmds.borrow().is_empty());
+    }
+
+    #[test]
+    fn test_run_positional_file_adds_png_extension() {
+        let rt = MockRuntime::new(Platform::Windows);
+        let args = Args {
+            file: Some(PathBuf::from("C:\\Screenshots\\capture")),
+            dry_run: true,
+            monitor: "primary".to_string(),
+            name: None,
+            output: None,
+            delay: 0,
+            open: false,
+            quiet: false,
+            clipboard: false,
+            no_save: false,
+            list_monitors: false,
+        };
+
+        // Should not panic - .png gets added automatically
+        run(args, &rt).unwrap();
+    }
+
+    #[test]
+    fn test_positional_conflicts_with_name_and_output() {
+        use clap::error::ErrorKind;
+
+        // file + --name should be rejected by clap
+        let result = Args::try_parse_from(["mdscreensnap", "out.png", "--name", "foo"]);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().kind(), ErrorKind::ArgumentConflict);
+
+        // file + --output should be rejected by clap
+        let result = Args::try_parse_from(["mdscreensnap", "out.png", "--output", "dir"]);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().kind(), ErrorKind::ArgumentConflict);
     }
 }

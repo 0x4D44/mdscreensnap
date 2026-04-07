@@ -1,6 +1,6 @@
 [package]
 name = "mdscreensnap"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "A simple command-line screenshot tool for Windows and WSL"
 license = "MIT"
